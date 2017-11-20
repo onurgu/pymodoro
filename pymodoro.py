@@ -8,6 +8,8 @@
 import os
 import sys
 import time
+import subprocess
+import math
 from argparse import ArgumentParser
 from subprocess import Popen
 
@@ -15,7 +17,6 @@ try:
     import configparser
 except ImportError:
     import ConfigParser as configparser
-
 
 class Config(object):
     """Load config from defaults, file and arguments."""
@@ -29,7 +30,7 @@ class Config(object):
     def load_defaults(self):
         self.script_path = self._get_script_path()
         self.data_path = os.path.join(self.script_path, 'data')
-        self.session_file = '~/.pomodoro_session'
+        self.session_file = os.path.expanduser('~/.pomodoro_session')
         self.auto_hide = False
 
         # Times
@@ -53,12 +54,17 @@ class Config(object):
         # Sound
         self.enable_sound = True
         self.enable_tick_sound = False
+        self.sound_command = 'aplay -q %s &'
         self.session_sound_file = os.path.join(self.data_path, 'session.wav')
         self.break_sound_file = os.path.join(self.data_path, 'break.wav')
         self.tick_sound_file = os.path.join(self.data_path, 'tick.wav')
 
         # Run until SIGINT or any other interrupts by default.
         self.enable_only_one_line = False
+
+        # Files for hooks (TODO make configurable)
+        self.start_pomodoro_hook_file = os.path.expanduser("~/.pymodoro/hooks/start-pomodoro.py")
+        self.complete_pomodoro_hook_file = os.path.expanduser("~/.pymodoro/hooks/complete-pomodoro.py")
 
     def load_user_data(self):
         """
@@ -88,7 +94,12 @@ class Config(object):
 
 
     def load_from_file(self):
-        self._parser = configparser.RawConfigParser()
+        # We need to set the default for oneline in the parser here so
+        # that users migrating from an older version of pymodoro who
+        # have an old config file that does not contain the oneline
+        # option don't crash when the parser tries to read it.
+        defaults = {'oneline': str(self.enable_only_one_line).lower()}
+        self._parser = configparser.RawConfigParser(defaults)
         self._dir = os.path.expanduser('~/.config/pymodoro')
         self._file = os.path.join(self._dir, 'config')
         self._load_config_file()
@@ -103,24 +114,30 @@ class Config(object):
 
         self._parser.read(self._file)
 
-        self.session_file = self._config_get_quoted_string('General', 'session')
-        self.auto_hide = self._parser.getboolean('General', 'autohide')
-        # Set 'oneline' to True if you want pymodoro to output only one line and exit.
-        self.enable_only_one_line = self._parser.getboolean('General', 'oneline')
+        try:
+            self.session_file = self._config_get_quoted_string('General', 'session')
+            self.auto_hide = self._parser.getboolean('General', 'autohide')
+            # Set 'oneline' to True if you want pymodoro to output only one line and exit.
+            self.enable_only_one_line = self._parser.getboolean('General', 'oneline')
 
-        self.pomodoro_prefix = self._config_get_quoted_string('Labels', 'pomodoro_prefix')
-        self.pomodoro_suffix = self._config_get_quoted_string('Labels', 'pomodoro_suffix')
-        self.break_prefix = self._config_get_quoted_string('Labels', 'break_prefix')
-        self.break_suffix = self._config_get_quoted_string('Labels', 'break_suffix')
+            self.pomodoro_prefix = self._config_get_quoted_string('Labels', 'pomodoro_prefix')
+            self.pomodoro_suffix = self._config_get_quoted_string('Labels', 'pomodoro_suffix')
+            self.break_prefix = self._config_get_quoted_string('Labels', 'break_prefix')
+            self.break_suffix = self._config_get_quoted_string('Labels', 'break_suffix')
 
-        self.left_to_right = self._parser.getboolean('Progress Bar', 'left_to_right')
-        self.total_number_of_marks = self._parser.getint('Progress Bar', 'total_marks')
-        self.session_full_mark_character = self._config_get_quoted_string('Progress Bar', 'session_character')
-        self.break_full_mark_character = self._config_get_quoted_string('Progress Bar', 'break_character')
-        self.empty_mark_character = self._config_get_quoted_string('Progress Bar', 'empty_character')
+            self.left_to_right = self._parser.getboolean('Progress Bar', 'left_to_right')
+            self.total_number_of_marks = self._parser.getint('Progress Bar', 'total_marks')
+            self.session_full_mark_character = self._config_get_quoted_string('Progress Bar', 'session_character')
+            self.break_full_mark_character = self._config_get_quoted_string('Progress Bar', 'break_character')
+            self.empty_mark_character = self._config_get_quoted_string('Progress Bar', 'empty_character')
 
-        self.enable_sound = self._parser.getboolean('Sound', 'enable')
-        self.enable_tick_sound = self._parser.getboolean('Sound', 'tick')
+            self.enable_sound = self._parser.getboolean('Sound', 'enable')
+            self.enable_tick_sound = self._parser.getboolean('Sound', 'tick')
+            self.sound_command = self._config_get_quoted_string('Sound', 'sound_command')
+        except configparser.NoOptionError:
+            # If the option is missing from the config file (old version of the file
+            # for example), don't throw an exception, just use the defaults
+            pass
 
 
     def _create_config_file(self):
@@ -145,11 +162,12 @@ class Config(object):
         self._parser.add_section('Sound')
         self._parser.set('Sound', 'enable', str(self.enable_sound).lower())
         self._parser.set('Sound', 'tick', str(self.enable_tick_sound).lower())
+        self._parser.set('Sound', 'command', str(self.sound_command).lower())
 
         if not os.path.exists(self._dir):
             os.makedirs(self._dir)
 
-        with open(self._file, 'wb') as configfile:
+        with open(self._file, 'at') as configfile:
             self._parser.write(configfile)
 
     def _config_set_quoted_string(self, section, option, value):
@@ -184,11 +202,12 @@ class Config(object):
         arg_parser.add_argument('-b', '--break', action='store', help='Break full mark characters (default: |).', metavar='CHARACTER', dest='break_full_mark_character')
         arg_parser.add_argument('-e', '--empty', action='store', help='Empty mark characters (default: ·).', metavar='CHARACTER', dest='empty_mark_character')
 
-        arg_parser.add_argument('-sp', '--pomodoro-sound', action='store', help='Pomodoro end sound file (default: nokiaring.wav).', metavar='PATH', dest='session_sound_file')
-        arg_parser.add_argument('-sb', '--break-sound', action='store', help='Break end sound file (default: rimshot.wav).', metavar='PATH', dest='break_sound_file')
-        arg_parser.add_argument('-st', '--tick-sound', action='store', help='Ticking sound file (default: klack.wav).', metavar='PATH', dest='tick_sound_file')
+        arg_parser.add_argument('-sp', '--pomodoro-sound', action='store', help='Pomodoro end sound file (default: session.wav).', metavar='PATH', dest='session_sound_file')
+        arg_parser.add_argument('-sb', '--break-sound', action='store', help='Break end sound file (default: break.wav).', metavar='PATH', dest='break_sound_file')
+        arg_parser.add_argument('-st', '--tick-sound', action='store', help='Ticking sound file (default: tick.wav).', metavar='PATH', dest='tick_sound_file')
         arg_parser.add_argument('-si', '--silent', action='store_true', help='Play no end sounds', dest='silent')
         arg_parser.add_argument('-t', '--tick', action='store_true', help='Play tick sound at every interval', dest='tick')
+        arg_parser.add_argument('-sc', '--sound-command', action='store', help='Command callled to play a sound. Default to "aplay -q %%s &". %%s will be replaced with the sound filename.', metavar='SOUND COMMAND', dest='sound_command')
         arg_parser.add_argument('-ltr', '--left-to-right', action='store_true', help='Display markers from left to right (incrementing marker instead of decrementing)', dest='left_to_right')
         arg_parser.add_argument('-bp', '--break-prefix', action='store', help='String to display before, when we are in a break. Default to "B". Can be used to format display for dzen.', metavar='BREAK PREFIX', dest='break_prefix')
         arg_parser.add_argument('-bs', '--break-suffix', action='store', help='String to display after, when we are in a break. Default to "". Can be used to format display for dzen.', metavar='BREAK SUFFIX', dest='break_suffix')
@@ -231,6 +250,8 @@ class Config(object):
             self.enable_sound = False
         if args.tick:
             self.enable_tick_sound = True
+        if args.sound_command:
+            self.sound_command = args.sound_command
         if args.left_to_right:
             self.left_to_right = True
         if args.no_break:
@@ -261,6 +282,9 @@ class Pymodoro(object):
         self.session = os.path.expanduser(self.config.session_file)
         self.set_durations()
         self.running = True
+        # cache last time the session file was touched
+        # to know if the session file contents should be re-read
+        self.last_start_time = 0 
 
     def run(self):
         """ Start main loop."""
@@ -278,22 +302,44 @@ class Pymodoro(object):
         if not hasattr(self, 'state'):
             self.state = self.IDLE_STATE
 
-        current_state = self.state
         seconds_left = self.get_seconds_left()
         break_duration = self.config.break_duration_in_seconds
         break_elapsed = self.get_break_elapsed(seconds_left)
 
         if seconds_left is None:
+            self.state = self.IDLE_STATE
+        elif seconds_left >= 0:
+            self.state = self.ACTIVE_STATE
+        elif break_elapsed <= break_duration:
+            self.state = self.BREAK_STATE
+        else:
+            self.state = self.WAIT_STATE
+
+        current_state = self.state
+
+        if seconds_left is None:
             next_state = self.IDLE_STATE
-        elif seconds_left > 0:
+        elif seconds_left > 1:
             next_state = self.ACTIVE_STATE
-        elif break_elapsed < break_duration:
+        elif break_elapsed + 1 < break_duration or seconds_left == 1:
             next_state = self.BREAK_STATE
         else:
             next_state = self.WAIT_STATE
 
         if next_state is not current_state:
             self.send_notifications(next_state)
+
+            # Execute hooks
+            if (current_state == self.ACTIVE_STATE and
+                next_state == self.BREAK_STATE and
+                os.path.exists(self.config.complete_pomodoro_hook_file)):
+                subprocess.check_call(self.config.complete_pomodoro_hook_file)
+
+            elif (current_state != self.ACTIVE_STATE and
+                  next_state == self.ACTIVE_STATE and
+                  os.path.exists(self.config.start_pomodoro_hook_file)):
+                subprocess.check_call(self.config.start_pomodoro_hook_file)
+
             self.state = next_state
 
     def send_notifications(self, next_state):
@@ -318,8 +364,8 @@ class Pymodoro(object):
         if sound:
             self.play_sound(sound)
 
-    def print_output(self):
-        """Print output determined by the current state."""
+    def make_output(self):
+        """Make output determined by the current state."""
         auto_hide = self.config.auto_hide
         seconds_left = self.get_seconds_left()
 
@@ -380,7 +426,11 @@ class Pymodoro(object):
             else:
                 timer = "Over a week"
 
-        sys.stdout.write(format % (prefix, progress, timer, suffix))
+        return format % (prefix, progress, timer, suffix)
+
+    def print_output(self):
+
+        sys.stdout.write(self.make_output())
         sys.stdout.flush()
 
     def wait(self):
@@ -397,9 +447,14 @@ class Pymodoro(object):
     def get_seconds_left(self):
         """Return seconds remaining in the current session."""
         seconds_left = None
-        session_duration = self.config.session_duration_in_seconds
         if os.path.exists(self.session):
             start_time = os.path.getmtime(self.session)
+            if start_time != self.last_start_time :
+                # the session file has been updated
+                # re-read the contents
+                self.set_durations()
+                self.last_start_time = start_time
+            session_duration = self.config.session_duration_in_seconds
             seconds_left = session_duration - time.time() + start_time
         return seconds_left
 
@@ -505,9 +560,10 @@ class Pymodoro(object):
         return output_seconds
 
     def play_sound(self, sound_file):
-        """Play specified sound file with aplay."""
+        """Play specified sound file with aplay by default."""
         if self.config.enable_sound:
-            os.system('aplay -q %s &' % sound_file)
+            with open(os.devnull, 'wb') as devnull:
+                subprocess.check_call(self.config.sound_command % sound_file, stdout=devnull, stderr=subprocess.STDOUT, shell=True)
 
     def notify(self, strings):
         """ Send a desktop notification."""

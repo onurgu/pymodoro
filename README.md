@@ -16,12 +16,33 @@ Add the following configuration to your Dzen2 configuration file to retrieve the
 
     ^fg(\#FFFFFF)${execi 10 python ~/.pymodoro/pymodoro.py -o}
 
+### i3
+
+The i3 module adds a little extra to pymodoro: it's using a color gradient to display the bar, from green to red depending on how may time is left.
+For the gradient to work, you need the `colour` python library first.
+
+    pip install colour
+
+You then need to use [py3status](https://github.com/ultrabug/py3status) an i3status wrapper written in python.
+
+In your `~/.i3/config` file, use `py3status` as your status command and give your pymodoro install directory as an include path:
+
+    status_command py3status -i ~/.pymodoro/
+
+Then add the module to your statusbar conf file (`~/.config/i3status/config` on my setup):
+
+    order += "pymodoroi3"
+
 
 ## Install
 
 To install Pymodoro system wide, run the setup.py script like this:
 
     python setup.py install
+    
+You can also install Pymodoro using pip, whithout having to download/clone the code manually:
+
+    pip install git+https://github.com/dattanchu/pymodoro.git
 
 ## Usage
 
@@ -51,6 +72,16 @@ Or:
 
 This way, whenever you hit modMask + n, you will start a new pomodoro.
 
+#### i3
+
+Here are some shortcuts examples for i3.
+
+    # stop a pomodoro
+    bindsym $mod+Shift+f exec rm ~/.pomodoro_session
+
+    # start/reset a pomodoro
+    bindsym $mod+Shift+h exec touch ~/.pomodoro_session
+
 ## Configure
 
 You can set all the options via command line paramters. For a detailed description run:
@@ -58,6 +89,14 @@ You can set all the options via command line paramters. For a detailed descripti
     ~/.pymodoro.py --help
 
 It is no longer needed to edit the script itself. If you still want to do it, open up the file **~/.pymodoro/pymodoro.py**.
+
+## Hooks
+There are currently two hooks, found in:
+
+    ~/.pymodoro/hooks/start-pomodoro.py
+    ~/.pymodoro/hooks/complete-pomodoro.py
+
+Create these files and they will be executed once the pomodoro starts and stop respectively.
 
 ## Credits
 
